@@ -18,6 +18,20 @@ const {
   PORT = 3000,
 } = process.env;
 
+// ── Validação de variáveis de ambiente ───────────────────────
+const VARS_OBRIGATORIAS = {
+  WHATSAPP_TOKEN,
+  VERIFY_TOKEN,
+  ANTHROPIC_API_KEY,
+  PHONE_NUMBER_ID,
+};
+
+Object.entries(VARS_OBRIGATORIAS).forEach(([nome, valor]) => {
+  if (!valor) {
+    console.warn(`⚠️  AVISO: Variável de ambiente "${nome}" não está definida. O bot pode não funcionar corretamente.`);
+  }
+});
+
 // ── Memória de sessão (por telefone) ─────────────────────────
 // Guarda histórico de conversa e carrinho de cada usuário
 const sessoes = {};
@@ -73,50 +87,73 @@ async function chamarClaude(telefone, mensagemUsuario) {
     sessao.historico = sessao.historico.slice(-20);
   }
 
-  const response = await axios.post(
-    "https://api.anthropic.com/v1/messages",
-    {
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 1000,
-      system: SYSTEM_PROMPT,
-      messages: sessao.historico,
-    },
-    {
-      headers: {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "Content-Type": "application/json",
+  try {
+    console.log(`🤖 [Claude] Enviando ${sessao.historico.length} mensagem(ns) para o telefone ${telefone}`);
+
+    const response = await axios.post(
+      "https://api.anthropic.com/v1/messages",
+      {
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1000,
+        system: SYSTEM_PROMPT,
+        messages: sessao.historico,
       },
-    }
-  );
+      {
+        headers: {
+          "x-api-key": ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01",
+          "Content-Type": "application/json",
+        },
+      }
+    );
 
-  const resposta = response.data.content[0].text;
+    const resposta = response.data.content[0].text;
+    console.log(`🤖 [Claude] Resposta recebida para ${telefone}: ${resposta.substring(0, 100)}${resposta.length > 100 ? "..." : ""}`);
 
-  sessao.historico.push({
-    role: "assistant",
-    content: resposta,
-  });
+    sessao.historico.push({
+      role: "assistant",
+      content: resposta,
+    });
 
-  return resposta;
+    return resposta;
+  } catch (erro) {
+    const status = erro.response?.status;
+    const detalhe = erro.response?.data ? JSON.stringify(erro.response.data) : erro.message;
+    console.error(`❌ [Claude] Erro ao chamar a API (status ${status}): ${detalhe}`);
+    console.error(`❌ [Claude] Stack trace: ${erro.stack}`);
+    throw erro;
+  }
 }
 
 // ── Função: Enviar mensagem WhatsApp ─────────────────────────
 async function enviarMensagem(telefone, texto) {
-  await axios.post(
-    `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
-    {
-      messaging_product: "whatsapp",
-      to: telefone,
-      type: "text",
-      text: { body: texto },
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-        "Content-Type": "application/json",
+  try {
+    console.log(`📤 [WhatsApp] Enviando mensagem para ${telefone}: ${texto.substring(0, 80)}${texto.length > 80 ? "..." : ""}`);
+
+    await axios.post(
+      `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to: telefone,
+        type: "text",
+        text: { body: texto },
       },
-    }
-  );
+      {
+        headers: {
+          Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    console.log(`✅ [WhatsApp] Mensagem enviada com sucesso para ${telefone}`);
+  } catch (erro) {
+    const status = erro.response?.status;
+    const detalhe = erro.response?.data ? JSON.stringify(erro.response.data) : erro.message;
+    console.error(`❌ [WhatsApp] Erro ao enviar mensagem para ${telefone} (status ${status}): ${detalhe}`);
+    console.error(`❌ [WhatsApp] Stack trace: ${erro.stack}`);
+    throw erro;
+  }
 }
 
 // ── Função: Gerar link de pagamento ──────────────────────────
@@ -135,12 +172,14 @@ function gerarLinkPagamento(pedido) {
 // ── Função: Processar mensagem recebida ──────────────────────
 async function processarMensagem(telefone, texto) {
   try {
+    console.log(`⚙️  [Processamento] Iniciando para ${telefone}`);
     const resposta = await chamarClaude(telefone, texto);
     const sessao = getSessao(telefone);
 
     // Verifica se a IA gerou um pedido estruturado
     const jsonMatch = resposta.match(/\{[^}]*"acao"\s*:\s*"pedido"[^}]*\}/);
     if (jsonMatch) {
+      console.log(`🛒 [Processamento] Pedido detectado para ${telefone}: ${jsonMatch[0]}`);
       const pedido = JSON.parse(jsonMatch[0]);
       pedido.telefone = telefone;
 
@@ -154,25 +193,32 @@ async function processarMensagem(telefone, texto) {
       const mensagemPedido =
         `✅ *Pedido confirmado!*\n\n` +
         `🔧 *Peça:* ${pedido.peca}\n` +
-        `💰 *Valor:* R$${pedido.preco.toFixed(2)}\n` +
+        `💰 *Valor:* R${pedido.preco.toFixed(2)}\n` +
         `🚚 *Frete:* ${frete === 0 ? "Grátis" : "R$" + frete.toFixed(2)}\n` +
-        `💳 *Total: R$${total}*\n\n` +
+        `💳 *Total: R${total}*\n\n` +
         `📦 Prazo: 3–5 dias úteis\n\n` +
         `👇 *Clique para pagar:*\n${linkPagamento}\n\n` +
         `_Após o pagamento, enviaremos o código de rastreio por aqui._`;
 
       await enviarMensagem(telefone, mensagemPedido);
+      console.log(`✅ [Processamento] Pedido enviado para ${telefone}`);
       return;
     }
 
     // Resposta normal da IA
     await enviarMensagem(telefone, resposta);
+    console.log(`✅ [Processamento] Resposta enviada para ${telefone}`);
   } catch (erro) {
-    console.error("Erro ao processar mensagem:", erro.message);
-    await enviarMensagem(
-      telefone,
-      "⚠️ Ops, tive um problema técnico. Pode repetir sua mensagem?"
-    );
+    console.error(`❌ [Processamento] Erro para ${telefone}: ${erro.message}`);
+    console.error(`❌ [Processamento] Stack trace: ${erro.stack}`);
+    try {
+      await enviarMensagem(
+        telefone,
+        "⚠️ Ops, tive um problema técnico. Pode repetir sua mensagem?"
+      );
+    } catch (erroEnvio) {
+      console.error(`❌ [Processamento] Falha ao enviar mensagem de erro para ${telefone}: ${erroEnvio.message}`);
+    }
   }
 }
 
@@ -197,19 +243,43 @@ app.post("/webhook", async (req, res) => {
   res.sendStatus(200); // Responde imediatamente para a Meta não reenviar
 
   try {
+    console.log("📨 [Webhook] POST recebido");
+    console.log("📨 [Webhook] Body completo:", JSON.stringify(req.body, null, 2));
+
     const entry = req.body?.entry?.[0];
+    if (!entry) {
+      console.log("📨 [Webhook] Nenhum 'entry' encontrado no body — possível evento de status ou ping da Meta");
+      return;
+    }
+
     const changes = entry?.changes?.[0];
+    if (!changes) {
+      console.log("📨 [Webhook] Nenhum 'changes' encontrado no entry");
+      return;
+    }
+
+    console.log("📨 [Webhook] Campo 'field':", changes.field);
+
     const value = changes?.value;
     const mensagens = value?.messages;
 
-    if (!mensagens || mensagens.length === 0) return;
+    if (!mensagens || mensagens.length === 0) {
+      console.log("📨 [Webhook] Nenhuma mensagem no payload — pode ser notificação de status de entrega");
+      console.log("📨 [Webhook] Statuses recebidos:", JSON.stringify(value?.statuses ?? [], null, 2));
+      return;
+    }
+
+    console.log(`📨 [Webhook] ${mensagens.length} mensagem(ns) recebida(s)`);
 
     const msg = mensagens[0];
     const telefone = msg.from;
     const tipo = msg.type;
 
+    console.log(`📩 [Webhook] Mensagem de ${telefone} | tipo: ${tipo} | id: ${msg.id}`);
+
     // Só processa mensagens de texto por enquanto
     if (tipo !== "text") {
+      console.log(`📨 [Webhook] Tipo "${tipo}" não suportado — enviando aviso para ${telefone}`);
       await enviarMensagem(
         telefone,
         "Por enquanto só processo mensagens de texto. Como posso te ajudar?"
@@ -222,8 +292,22 @@ app.post("/webhook", async (req, res) => {
 
     await processarMensagem(telefone, texto);
   } catch (erro) {
-    console.error("Erro no webhook:", erro);
+    console.error("❌ [Webhook] Erro inesperado:", erro.message);
+    console.error("❌ [Webhook] Stack trace:", erro.stack);
   }
+});
+
+// Endpoint de teste — confirma que o servidor e o webhook estão acessíveis
+app.get("/test", (req, res) => {
+  const varsStatus = Object.fromEntries(
+    Object.entries(VARS_OBRIGATORIAS).map(([nome, valor]) => [nome, valor ? "✅ definida" : "❌ ausente"])
+  );
+  res.json({
+    status: "ok",
+    mensagem: "Servidor AutoPeças IA está funcionando corretamente",
+    timestamp: new Date().toISOString(),
+    variaveis: varsStatus,
+  });
 });
 
 // Health check
@@ -239,4 +323,5 @@ app.get("/", (req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 AutoPeças IA rodando na porta ${PORT}`);
   console.log(`📡 Webhook: http://localhost:${PORT}/webhook`);
+  console.log(`🔍 Teste:   http://localhost:${PORT}/test`);
 });
