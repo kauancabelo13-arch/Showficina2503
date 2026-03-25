@@ -242,21 +242,43 @@ app.post("/webhook", async (req, res) => {
     console.log("📨 [Webhook] POST recebido");
     console.log("📨 [Webhook] Body completo:", JSON.stringify(req.body, null, 2));
 
-    const mensagens = req.body?.messages;
+    let telefone, texto, msgId;
 
-    if (!mensagens || mensagens.length === 0) {
-      console.log("📨 [Webhook] Nenhuma mensagem no payload — pode ser notificação de status ou ping da Z-API");
+    // ── Formato Z-API (payload direto com req.body.text.message) ──
+    if (req.body?.text) {
+      const tipo = req.body.type;
+
+      // Ignora callbacks que não sejam mensagens recebidas (ex: status de envio)
+      if (tipo !== "ReceivedCallback") {
+        console.log(`📨 [Webhook] Evento ignorado — type: "${tipo}" não é ReceivedCallback`);
+        return;
+      }
+
+      telefone = req.body.phone;
+      texto    = req.body.text?.message;
+      msgId    = req.body.messageId;
+
+      console.log(`📩 [Webhook] Formato Z-API detectado | de: ${telefone} | id: ${msgId}`);
+
+    // ── Formato legado (array req.body.messages) ──────────────────
+    } else if (req.body?.messages?.length > 0) {
+      const msg = req.body.messages[0];
+      telefone  = msg.phone;
+      texto     = msg.text;
+      msgId     = msg.id;
+
+      console.log(`📩 [Webhook] Formato legado detectado | de: ${telefone} | id: ${msgId}`);
+
+    // ── Payload desconhecido / ping ───────────────────────────────
+    } else {
+      console.log("📨 [Webhook] Nenhuma mensagem reconhecida no payload — pode ser notificação de status ou ping da Z-API");
       return;
     }
 
-    console.log(`📨 [Webhook] ${mensagens.length} mensagem(ns) recebida(s)`);
-
-    const msg = mensagens[0];
-    const telefone = msg.phone;
-    const texto = msg.text;
-    const msgId = msg.id;
-
-    console.log(`📩 [Webhook] Mensagem de ${telefone} | id: ${msgId}`);
+    if (!telefone) {
+      console.log("📨 [Webhook] Telefone ausente no payload — ignorando");
+      return;
+    }
 
     if (!texto) {
       console.log(`📨 [Webhook] Mensagem sem texto de ${telefone} — enviando aviso`);
