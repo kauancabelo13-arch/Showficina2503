@@ -10,20 +10,21 @@ app.use(express.json());
 
 // ── Configurações (preencha no .env) ─────────────────────────
 const {
-  WHATSAPP_TOKEN,       // Token da Meta API
+  ZAPI_TOKEN,           // Token da Z-API
+  ZAPI_INSTANCE_ID,     // ID da instância na Z-API
+  ZAPI_API_URL = "https://api.z-api.io", // URL base da Z-API
   VERIFY_TOKEN,         // Token de verificação do webhook (você escolhe)
   ANTHROPIC_API_KEY,    // Chave da API do Claude
-  PHONE_NUMBER_ID,      // ID do número no Meta
   PAGAMENTO_BASE_URL,   // URL base dos seus links de pagamento (ex: mercadopago)
   PORT = 3000,
 } = process.env;
 
 // ── Validação de variáveis de ambiente ───────────────────────
 const VARS_OBRIGATORIAS = {
-  WHATSAPP_TOKEN,
+  ZAPI_TOKEN,
+  ZAPI_INSTANCE_ID,
   VERIFY_TOKEN,
   ANTHROPIC_API_KEY,
-  PHONE_NUMBER_ID,
 };
 
 Object.entries(VARS_OBRIGATORIAS).forEach(([nome, valor]) => {
@@ -125,33 +126,30 @@ async function chamarClaude(telefone, mensagemUsuario) {
   }
 }
 
-// ── Função: Enviar mensagem WhatsApp ─────────────────────────
+// ── Função: Enviar mensagem WhatsApp (Z-API) ─────────────────
 async function enviarMensagem(telefone, texto) {
   try {
-    console.log(`📤 [WhatsApp] Enviando mensagem para ${telefone}: ${texto.substring(0, 80)}${texto.length > 80 ? "..." : ""}`);
+    console.log(`📤 [Z-API] Enviando mensagem para ${telefone}: ${texto.substring(0, 80)}${texto.length > 80 ? "..." : ""}`);
 
     await axios.post(
-      `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
+      `${ZAPI_API_URL}/instances/${ZAPI_INSTANCE_ID}/token/${ZAPI_TOKEN}/send-text`,
       {
-        messaging_product: "whatsapp",
-        to: telefone,
-        type: "text",
-        text: { body: texto },
+        phone: telefone,
+        message: texto,
       },
       {
         headers: {
-          Authorization: `Bearer ${WHATSAPP_TOKEN}`,
           "Content-Type": "application/json",
         },
       }
     );
 
-    console.log(`✅ [WhatsApp] Mensagem enviada com sucesso para ${telefone}`);
+    console.log(`✅ [Z-API] Mensagem enviada com sucesso para ${telefone}`);
   } catch (erro) {
     const status = erro.response?.status;
     const detalhe = erro.response?.data ? JSON.stringify(erro.response.data) : erro.message;
-    console.error(`❌ [WhatsApp] Erro ao enviar mensagem para ${telefone} (status ${status}): ${detalhe}`);
-    console.error(`❌ [WhatsApp] Stack trace: ${erro.stack}`);
+    console.error(`❌ [Z-API] Erro ao enviar mensagem para ${telefone} (status ${status}): ${detalhe}`);
+    console.error(`❌ [Z-API] Stack trace: ${erro.stack}`);
     throw erro;
   }
 }
@@ -224,62 +222,44 @@ async function processarMensagem(telefone, texto) {
 
 // ── Rotas ─────────────────────────────────────────────────────
 
-// Verificação do webhook (exigida pela Meta)
+// Verificação do webhook (Z-API envia um GET para confirmar o endpoint)
 app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
+  const token = req.query["verify_token"];
 
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+  if (token === VERIFY_TOKEN) {
     console.log("✅ Webhook verificado com sucesso");
-    res.status(200).send(challenge);
+    res.status(200).send("ok");
   } else {
     res.sendStatus(403);
   }
 });
 
-// Recebimento de mensagens do WhatsApp
+// Recebimento de mensagens do WhatsApp (Z-API)
 app.post("/webhook", async (req, res) => {
-  res.sendStatus(200); // Responde imediatamente para a Meta não reenviar
+  res.sendStatus(200); // Responde imediatamente para a Z-API não reenviar
 
   try {
     console.log("📨 [Webhook] POST recebido");
     console.log("📨 [Webhook] Body completo:", JSON.stringify(req.body, null, 2));
 
-    const entry = req.body?.entry?.[0];
-    if (!entry) {
-      console.log("📨 [Webhook] Nenhum 'entry' encontrado no body — possível evento de status ou ping da Meta");
-      return;
-    }
-
-    const changes = entry?.changes?.[0];
-    if (!changes) {
-      console.log("📨 [Webhook] Nenhum 'changes' encontrado no entry");
-      return;
-    }
-
-    console.log("📨 [Webhook] Campo 'field':", changes.field);
-
-    const value = changes?.value;
-    const mensagens = value?.messages;
+    const mensagens = req.body?.messages;
 
     if (!mensagens || mensagens.length === 0) {
-      console.log("📨 [Webhook] Nenhuma mensagem no payload — pode ser notificação de status de entrega");
-      console.log("📨 [Webhook] Statuses recebidos:", JSON.stringify(value?.statuses ?? [], null, 2));
+      console.log("📨 [Webhook] Nenhuma mensagem no payload — pode ser notificação de status ou ping da Z-API");
       return;
     }
 
     console.log(`📨 [Webhook] ${mensagens.length} mensagem(ns) recebida(s)`);
 
     const msg = mensagens[0];
-    const telefone = msg.from;
-    const tipo = msg.type;
+    const telefone = msg.phone;
+    const texto = msg.text;
+    const msgId = msg.id;
 
-    console.log(`📩 [Webhook] Mensagem de ${telefone} | tipo: ${tipo} | id: ${msg.id}`);
+    console.log(`📩 [Webhook] Mensagem de ${telefone} | id: ${msgId}`);
 
-    // Só processa mensagens de texto por enquanto
-    if (tipo !== "text") {
-      console.log(`📨 [Webhook] Tipo "${tipo}" não suportado — enviando aviso para ${telefone}`);
+    if (!texto) {
+      console.log(`📨 [Webhook] Mensagem sem texto de ${telefone} — enviando aviso`);
       await enviarMensagem(
         telefone,
         "Por enquanto só processo mensagens de texto. Como posso te ajudar?"
@@ -287,7 +267,6 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    const texto = msg.text.body;
     console.log(`📩 [${telefone}]: ${texto}`);
 
     await processarMensagem(telefone, texto);
